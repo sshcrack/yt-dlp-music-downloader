@@ -15,6 +15,7 @@ use anyhow::{Context, Result, anyhow};
 use bytes::Bytes;
 use indicatif::{ProgressBar, ProgressStyle};
 use reqwest::Client;
+use rfd::FileDialog;
 use serde::{Deserialize, Serialize};
 use thirtyfour::{
     FirefoxCapabilities, WebDriver, common::capabilities::firefox::FirefoxPreferences,
@@ -34,14 +35,14 @@ const SECS_MONTH: u64 = 86_400 * 30;
 // ─── Portable paths ───────────────────────────────────────────────────────────
 
 fn exe_dir() -> Result<PathBuf> {
-    let exe = std::env::current_exe().context("Cannot resolve executable path")?;
+    let exe = std::env::current_exe().context("Kann ausführbaren Pfad nicht ermitteln")?;
     exe.parent()
-        .context("Executable has no parent directory")
+        .context("Die ausführbare Datei hat kein übergeordnetes Verzeichnis")
         .map(|p| p.to_path_buf())
 }
 
 fn music_dir() -> Result<PathBuf> {
-    let profile = std::env::var("USERPROFILE").context("USERPROFILE env var not set")?;
+    let profile = std::env::var("USERPROFILE").context("Umgebungsvariable USERPROFILE nicht gesetzt")?;
     Ok(PathBuf::from(profile).join("Music"))
 }
 
@@ -99,7 +100,7 @@ async fn gh_latest(client: &Client, repo: &str) -> Result<GhRelease> {
         .error_for_status()?
         .json::<GhRelease>()
         .await
-        .context("Failed to parse GitHub release JSON")
+        .context("Konnte GitHub-Release-JSON nicht parsen")
 }
 
 fn strip_v(tag: &str) -> String {
@@ -122,10 +123,9 @@ async fn fetch_with_spinner(client: &Client, url: &str, label: &str) -> Result<B
         .header("User-Agent", "ytmusic-dl/1.0")
         .send()
         .await?
-        .error_for_status()?
         .bytes()
         .await
-        .with_context(|| format!("Download failed: {}", url))?;
+        .with_context(|| format!("Herunterladen fehlgeschlagen: {}", url))?;
     pb.finish_and_clear();
     Ok(bytes)
 }
@@ -133,8 +133,8 @@ async fn fetch_with_spinner(client: &Client, url: &str, label: &str) -> Result<B
 /// Downloads `url` and writes it directly to `dest`.
 async fn download_file(client: &Client, url: &str, dest: &Path) -> Result<()> {
     let label = dest.file_name().and_then(|n| n.to_str()).unwrap_or("file");
-    let bytes = fetch_with_spinner(client, url, &format!("Downloading {}", label)).await?;
-    fs::write(dest, &bytes).with_context(|| format!("Cannot write {}", dest.display()))?;
+    let bytes = fetch_with_spinner(client, url, &format!("Lade {} herunter", label)).await?;
+    fs::write(dest, &bytes).with_context(|| format!("Kann nicht schreiben: {}", dest.display()))?;
     Ok(())
 }
 
@@ -149,7 +149,7 @@ async fn download_zip(
 ) -> Result<()> {
     let bytes = fetch_with_spinner(client, url, label).await?;
     let cursor = io::Cursor::new(bytes);
-    let mut archive = zip::ZipArchive::new(cursor).context("Failed to open zip archive")?;
+    let mut archive = zip::ZipArchive::new(cursor).context("Konnte Zip-Archiv nicht öffnen")?;
 
     for i in 0..archive.len() {
         let mut entry = archive.by_index(i)?;
@@ -175,7 +175,7 @@ async fn download_zip(
 
         let out = dest.join(&fname);
         let mut outf =
-            fs::File::create(&out).with_context(|| format!("Cannot create {}", out.display()))?;
+            fs::File::create(&out).with_context(|| format!("Kann nicht erstellen: {}", out.display()))?;
         io::copy(&mut entry, &mut outf)?;
     }
     Ok(())
@@ -217,7 +217,7 @@ async fn update_geckodriver(client: &Client, dir: &Path, cache: &mut Cache) -> R
         .unwrap_or(true);
 
     match &current {
-        None => println!("  not found — will download {}", latest),
+        None => println!("  nicht gefunden — lade {} herunter", latest),
         Some(v) if needs => println!("  {} → {}", v, latest),
         Some(v) => {
             println!("  {} ✓", v);
@@ -230,19 +230,19 @@ async fn update_geckodriver(client: &Client, dir: &Path, cache: &mut Cache) -> R
         .assets
         .iter()
         .find(|a| a.name == zip_name)
-        .with_context(|| format!("Asset '{}' not found in release", zip_name))?;
+        .with_context(|| format!("Asset '{}' in Release nicht gefunden", zip_name))?;
 
     download_zip(
         client,
         &asset.browser_download_url,
-        "Downloading geckodriver",
+        "Lade geckodriver herunter",
         dir,
         &["geckodriver.exe"],
     )
     .await?;
 
     cache.geckodriver_version = Some(latest.clone());
-    println!("  installed geckodriver {}", latest);
+    println!("  geckodriver {} installiert", latest);
     Ok(())
 }
 
@@ -257,7 +257,7 @@ async fn update_ytdlp(client: &Client, dir: &Path, cache: &mut Cache) -> Result<
             .unwrap_or(false)
     {
         section("yt-dlp");
-        println!("  checked recently — skipping");
+        println!("  kürzlich geprüft — überspringe");
         return Ok(());
     }
 
@@ -268,7 +268,7 @@ async fn update_ytdlp(client: &Client, dir: &Path, cache: &mut Cache) -> Result<
         .assets
         .iter()
         .find(|a| a.name == "yt-dlp.exe")
-        .context("yt-dlp.exe not in release assets")?;
+        .context("yt-dlp.exe nicht in Release-Assets")?;
 
     // yt-dlp --version outputs the version string on stdout (e.g. 2024.12.13)
     let current = binary_version(&bin, "--version", 0);
@@ -278,7 +278,7 @@ async fn update_ytdlp(client: &Client, dir: &Path, cache: &mut Cache) -> Result<
         .unwrap_or(true);
 
     match &current {
-        None => println!("  not found — will download {}", latest),
+        None => println!("  nicht gefunden — lade {} herunter", latest),
         Some(v) if needs => println!("  {} → {}", v, latest),
         Some(v) => {
             println!("  {} ✓", v);
@@ -289,7 +289,7 @@ async fn update_ytdlp(client: &Client, dir: &Path, cache: &mut Cache) -> Result<
 
     download_file(client, &asset.browser_download_url, &bin).await?;
     cache.ytdlp_last_check = Some(now);
-    println!("  installed yt-dlp {}", latest);
+    println!("  yt-dlp {} installiert", latest);
     Ok(())
 }
 
@@ -305,7 +305,7 @@ async fn update_ffmpeg(client: &Client, dir: &Path, cache: &mut Cache) -> Result
             .map(|t| now - t < SECS_MONTH)
             .unwrap_or(false)
     {
-        println!("  updated recently — skipping");
+        println!("  vor Kurzem aktualisiert — überspringe");
         return Ok(());
     }
 
@@ -317,14 +317,14 @@ async fn update_ffmpeg(client: &Client, dir: &Path, cache: &mut Cache) -> Result
         .assets
         .iter()
         .find(|a| a.name == zip)
-        .context("ffmpeg zip not in release assets")?;
+        .context("ffmpeg zip nicht in Release-Assets")?;
 
     // The zip layout is:  ffmpeg-master-latest-win64-gpl/bin/{ffmpeg,ffprobe}.exe
     // We stream-extract only those two binaries.
     let bytes = fetch_with_spinner(
         client,
         &asset.browser_download_url,
-        "Downloading ffmpeg (large, ~100 MB)",
+        "Lade ffmpeg herunter (groß, ~100 MB)",
     )
     .await?;
 
@@ -344,7 +344,7 @@ async fn update_ffmpeg(client: &Client, dir: &Path, cache: &mut Cache) -> Result
         let fname = Path::new(&raw).file_name().unwrap().to_str().unwrap();
         let out = ffdir.join(fname);
         let mut outf =
-            fs::File::create(&out).with_context(|| format!("Cannot create {}", out.display()))?;
+            fs::File::create(&out).with_context(|| format!("Kann nicht erstellen: {}", out.display()))?;
         io::copy(&mut f, &mut outf)?;
         extracted += 1;
         if extracted == 2 {
@@ -353,7 +353,7 @@ async fn update_ffmpeg(client: &Client, dir: &Path, cache: &mut Cache) -> Result
     }
 
     cache.ffmpeg_last_dl = Some(now);
-    println!("  ffmpeg/ffprobe updated");
+    println!("  ffmpeg/ffprobe aktualisiert");
     Ok(())
 }
 
@@ -368,7 +368,7 @@ async fn update_deno(client: &Client, dir: &Path, cache: &mut Cache) -> Result<(
             .unwrap_or(false)
     {
         section("deno");
-        println!("  checked recently — skipping");
+        println!("  kürzlich geprüft — überspringe");
         return Ok(());
     }
 
@@ -380,7 +380,7 @@ async fn update_deno(client: &Client, dir: &Path, cache: &mut Cache) -> Result<(
         .assets
         .iter()
         .find(|a| a.name == zip)
-        .context("deno zip not in release assets")?;
+        .context("deno zip nicht in Release-Assets")?;
 
     // deno --version first line: "deno 2.x.x ..."
     let current = binary_version(&bin, "--version", 1);
@@ -390,7 +390,7 @@ async fn update_deno(client: &Client, dir: &Path, cache: &mut Cache) -> Result<(
         .unwrap_or(true);
 
     match &current {
-        None => println!("  not found — will download {}", latest),
+        None => println!("  nicht gefunden — lade {} herunter", latest),
         Some(v) if needs => println!("  {} → {}", v, latest),
         Some(v) => {
             println!("  {} ✓", v);
@@ -402,14 +402,14 @@ async fn update_deno(client: &Client, dir: &Path, cache: &mut Cache) -> Result<(
     download_zip(
         client,
         &asset.browser_download_url,
-        "Downloading deno",
+        "Lade deno herunter",
         dir,
         &["deno.exe"],
     )
     .await?;
 
     cache.deno_last_check = Some(now);
-    println!("  installed deno {}", latest);
+    println!("  deno {} installiert", latest);
     Ok(())
 }
 
@@ -421,7 +421,7 @@ fn spawn_geckodriver(dir: &Path) -> Result<std::process::Child> {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
-        .context("Failed to spawn geckodriver.exe")
+        .context("Starten von geckodriver.exe fehlgeschlagen")
 }
 
 // ─── WebDriver / Firefox ──────────────────────────────────────────────────────
@@ -431,16 +431,33 @@ async fn open_browser(dir: &Path) -> Result<WebDriver> {
     fs::create_dir_all(&profile)?;
     let profile_str = profile
         .to_str()
-        .context("Profile path is not valid UTF-8")?;
+        .context("Profilpfad ist kein gültiges UTF-8")?;
 
     let mut caps = FirefoxCapabilities::new();
     // Pass profile path via Firefox command-line args (geckodriver supports this)
     caps.add_arg("-profile")?;
     caps.add_arg(profile_str)?;
 
+    let firefox_path = dir.join("firefox_binary_path");
+    if !firefox_path.exists() {
+        let files = FileDialog::new()
+            .add_filter("Executables", &["exe"])
+            .pick_file()
+            .expect("Du musst deine Firefox-Installation auswählen (firefox.exe)");
+
+        fs::write(&firefox_path, files.to_str().unwrap_or(""))
+            .context("Speichern des Firefox-Pfads fehlgeschlagen")?;
+    }
+
+    let firefox_binary = fs::read_to_string(&firefox_path)
+        .context("Konnte firefox_binary_path nicht lesen")?
+        .trim()
+        .to_string();
+
+    caps.set_firefox_binary(&firefox_binary)?;
     WebDriver::new(&format!("http://localhost:{}", GECKODRIVER_PORT), caps)
         .await
-        .context("Failed to connect to Firefox via geckodriver")
+        .context("Verbindung zu Firefox über geckodriver fehlgeschlagen")
 }
 
 // ─── Download-button injection ────────────────────────────────────────────────
@@ -456,7 +473,7 @@ const INJECT_JS: &str = r#"
 
     var btn = document.createElement('button');
     btn.id = '__ytdl_btn';
-    btn.textContent = '\u25BC\u00A0Download MP3';
+    btn.textContent = '\u25BC\u00A0MP3 herunterladen';
 
     var s = btn.style;
     s.background     = 'linear-gradient(135deg, #b80000, #ff2222)';
@@ -482,7 +499,7 @@ const INJECT_JS: &str = r#"
     btn.addEventListener('click', function () {
         window.__ytdl_clicked = true;
         window.__ytdl_url     = location.href;
-        this.textContent      = '\u2713\u00A0Starting\u2026';
+        this.textContent      = '\u2713\u00A0Starte\u2026';
         this.disabled         = true;
         this.style.background = '#555';
         this.style.cursor     = 'default';
@@ -524,7 +541,7 @@ fn parse_pct(line: &str) -> Option<u64> {
     before[start..].trim().parse::<f64>().ok().map(|f| f as u64)
 }
 
-async fn run_download(dir: &Path, video_id: &str) -> Result<()> {
+async fn run_download(dir: &Path, video_id: &str) -> Result<Option<String>> {
     let ytdlp = dir.join("yt-dlp.exe");
     let ffmpeg_dir = dir.join("ffmpeg");
     let deno_bin = dir.join("deno.exe");
@@ -534,7 +551,7 @@ async fn run_download(dir: &Path, video_id: &str) -> Result<()> {
 
     println!();
     println!("  Video : {}", url);
-    println!("  Output: {}", out_dir.display());
+    println!("  Ausgabe: {}", out_dir.display());
     println!();
 
     // Build yt-dlp argument list
@@ -572,14 +589,14 @@ async fn run_download(dir: &Path, video_id: &str) -> Result<()> {
             .unwrap()
             .progress_chars("█▊░"),
     );
-    pb.set_message("Fetching info…");
+    pb.set_message("Informationen werden abgerufen…");
 
     let mut child = AsyncCommand::new(&ytdlp)
         .args(&args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .context("Failed to start yt-dlp.exe")?;
+        .context("Starten von yt-dlp.exe fehlgeschlagen")?;
 
     let stdout = child.stdout.take().unwrap();
     let stderr = child.stderr.take().unwrap();
@@ -610,29 +627,55 @@ async fn run_download(dir: &Path, video_id: &str) -> Result<()> {
             }
         } else if line.contains("[ExtractAudio]") {
             pb.set_position(100);
-            pb.set_message("Converting to MP3…");
+            pb.set_message("Wandle in MP3 um…");
         } else if line.contains("[Metadata]") {
-            pb.set_message("Writing metadata…");
+            pb.set_message("Schreibe Metadaten…");
         } else if line.contains("[EmbedThumbnail]") {
-            pb.set_message("Embedding thumbnail…");
+            pb.set_message("Vorschaubild einbetten…");
         } else if !line.trim().is_empty() && line.starts_with('[') {
             pb.println(format!("  {}", line.trim()));
         }
     }
 
     let _ = stderr_task.await;
-    let status = child.wait().await.context("yt-dlp process error")?;
+    let status = child.wait().await.context("yt-dlp Prozessfehler")?;
 
     if status.success() {
-        pb.finish_with_message("✓ Done!");
+        pb.finish_with_message("✓ Fertig!");
         println!();
-        println!("  Saved to {}", out_dir.display());
-    } else {
-        pb.finish_with_message("✗ Failed");
-        return Err(anyhow!("yt-dlp exited with non-zero status"));
-    }
+        println!("  Gespeichert in {}", out_dir.display());
 
-    Ok(())
+        // Versuche, die zuletzt erstellte MP3-Datei im Ausgabeverzeichnis zu finden.
+        let newest = std::fs::read_dir(&out_dir)
+            .ok()
+            .into_iter()
+            .flat_map(|rd| rd.filter_map(Result::ok))
+            .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
+            .map(|e| e.path())
+            .filter(|p| {
+                p.extension()
+                    .and_then(|s| s.to_str())
+                    .map(|s| s.eq_ignore_ascii_case("mp3"))
+                    .unwrap_or(true)
+            })
+            .max_by_key(|p| {
+                p.metadata()
+                    .and_then(|m| m.modified())
+                    .ok()
+                    .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0)
+            });
+
+        if let Some(p) = newest {
+            return Ok(Some(p.display().to_string()));
+        }
+
+        return Ok(None);
+    } else {
+        pb.finish_with_message("✗ Fehlgeschlagen");
+        return Err(anyhow!("yt-dlp mit Fehlercode beendet"));
+    }
 }
 
 // ─── Main loop ────────────────────────────────────────────────────────────────
@@ -655,13 +698,13 @@ async fn main() -> Result<()> {
         .build()?;
 
     // ── Dependency updates ────────────────────────────────────────────────────
-    println!("Dependencies");
+    println!("Abhängigkeiten");
     println!("────────────────────────────────────────");
 
     macro_rules! try_update {
         ($fut:expr, $name:expr) => {
             if let Err(e) = $fut.await {
-                eprintln!("  WARNING: {} update failed: {}", $name, e);
+                eprintln!("  WARNUNG: Aktualisierung von {} fehlgeschlagen: {}", $name, e);
             }
         };
     }
@@ -692,10 +735,10 @@ async fn main() -> Result<()> {
     driver
         .get("https://www.youtube.com")
         .await
-        .context("Could not navigate to YouTube")?;
+        .context("Konnte nicht zu YouTube navigieren")?;
 
-    println!("  Firefox is ready.");
-    println!("  Navigate to a YouTube video, then click ▼ Download MP3.");
+    println!("  Firefox ist bereit.");
+    println!("  Öffne ein YouTube-Video und klicke dann auf ▼ MP3 herunterladen.");
     println!();
 
     // ── Poll loop ─────────────────────────────────────────────────────────────
@@ -709,7 +752,7 @@ async fn main() -> Result<()> {
         let current_url = match driver.current_url().await {
             Ok(u) => u.to_string(),
             Err(_) => {
-                println!("  Browser was closed — exiting.");
+                println!("  Browser wurde geschlossen — beende.");
                 break 'poll;
             }
         };
@@ -781,23 +824,37 @@ async fn main() -> Result<()> {
     // ── Download ──────────────────────────────────────────────────────────────
     match download_url.and_then(|u| extract_video_id(&u).map(|id| (u, id))) {
         None => {
-            eprintln!("No video URL captured.");
+            eprintln!("Keine Video-URL erfasst.");
         }
         Some((raw_url, video_id)) => {
             println!();
-            println!("Download");
+            println!("Herunterladen");
             println!("────────────────────────────────────────");
             println!("  ID: {}", video_id);
-            if let Err(e) = run_download(&dir, &video_id).await {
-                eprintln!("  Error: {}", e);
-                eprintln!("  URL was: {}", raw_url);
+            match run_download(&dir, &video_id).await {
+                Ok(Some(created)) => {
+                    println!();
+                    // Große Fertig-Meldung mit Datei
+                    println!("╔════════════════════════════════════════════════════════╗");
+                    println!("║  ✓ FERTIG!                                             ║");
+                    println!("║  Datei erstellt:                                       ║");
+                    println!("║  {}", created);
+                    println!("╚════════════════════════════════════════════════════════╝");
+                }
+                Ok(None) => {
+                    // keine Datei ermittelt, nichts weiter tun
+                }
+                Err(e) => {
+                    eprintln!("  Fehler: {}", e);
+                    eprintln!("  URL war: {}", raw_url);
+                }
             }
         }
     }
 
     println!();
     println!("────────────────────────────────────────");
-    print!("Press Enter to close…");
+    print!("Drücke Enter zum Schließen…");
     let _ = io::stdout().flush();
     let mut buf = String::new();
     let _ = io::stdin().read_line(&mut buf);
