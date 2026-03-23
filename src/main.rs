@@ -17,9 +17,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 use reqwest::Client;
 use rfd::FileDialog;
 use serde::{Deserialize, Serialize};
-use thirtyfour::{
-    FirefoxCapabilities, WebDriver, common::capabilities::firefox::FirefoxPreferences,
-};
+use thirtyfour::{FirefoxCapabilities, WebDriver};
 use tokio::{
     io::{AsyncBufReadExt, BufReader as AsyncBufReader},
     process::Command as AsyncCommand,
@@ -42,7 +40,8 @@ fn exe_dir() -> Result<PathBuf> {
 }
 
 fn music_dir() -> Result<PathBuf> {
-    let profile = std::env::var("USERPROFILE").context("Umgebungsvariable USERPROFILE nicht gesetzt")?;
+    let profile =
+        std::env::var("USERPROFILE").context("Umgebungsvariable USERPROFILE nicht gesetzt")?;
     Ok(PathBuf::from(profile).join("Music"))
 }
 
@@ -174,8 +173,8 @@ async fn download_zip(
         }
 
         let out = dest.join(&fname);
-        let mut outf =
-            fs::File::create(&out).with_context(|| format!("Kann nicht erstellen: {}", out.display()))?;
+        let mut outf = fs::File::create(&out)
+            .with_context(|| format!("Kann nicht erstellen: {}", out.display()))?;
         io::copy(&mut entry, &mut outf)?;
     }
     Ok(())
@@ -343,8 +342,8 @@ async fn update_ffmpeg(client: &Client, dir: &Path, cache: &mut Cache) -> Result
 
         let fname = Path::new(&raw).file_name().unwrap().to_str().unwrap();
         let out = ffdir.join(fname);
-        let mut outf =
-            fs::File::create(&out).with_context(|| format!("Kann nicht erstellen: {}", out.display()))?;
+        let mut outf = fs::File::create(&out)
+            .with_context(|| format!("Kann nicht erstellen: {}", out.display()))?;
         io::copy(&mut f, &mut outf)?;
         extracted += 1;
         if extracted == 2 {
@@ -704,7 +703,10 @@ async fn main() -> Result<()> {
     macro_rules! try_update {
         ($fut:expr, $name:expr) => {
             if let Err(e) = $fut.await {
-                eprintln!("  WARNUNG: Aktualisierung von {} fehlgeschlagen: {}", $name, e);
+                eprintln!(
+                    "  WARNUNG: Aktualisierung von {} fehlgeschlagen: {}",
+                    $name, e
+                );
             }
         };
     }
@@ -834,12 +836,7 @@ async fn main() -> Result<()> {
             match run_download(&dir, &video_id).await {
                 Ok(Some(created)) => {
                     println!();
-                    // Große Fertig-Meldung mit Datei
-                    println!("╔════════════════════════════════════════════════════════╗");
-                    println!("║  ✓ FERTIG!                                             ║");
-                    println!("║  Datei erstellt:                                       ║");
-                    println!("║  {}", created);
-                    println!("╚════════════════════════════════════════════════════════╝");
+                    print_completion(&created);
                 }
                 Ok(None) => {
                     // keine Datei ermittelt, nichts weiter tun
@@ -881,5 +878,35 @@ fn print_banner() {
     println!("  ╔═══════════════════════════════════════╗");
     println!("  ║     YouTube Music Downloader (ytmd)   ║");
     println!("  ╚═══════════════════════════════════════╝");
+    println!();
+}
+
+fn print_completion(path: &str) {
+    // Make the completion very hard to miss: several large boxed banners
+    let width = 78usize;
+    let bar = "#".repeat(width);
+
+    // A few blank lines to separate from previous output
+    println!(
+        "
+
+"
+    );
+
+    for _ in 0..3 {
+        println!("{}", bar);
+        println!("#{: ^width$}#", "", width = width - 2);
+        println!(
+            "#{: ^width$}#",
+            "✓   FERTIG!   —   DOWNLOADED",
+            width = width - 2
+        );
+        println!("#{: ^width$}#", "", width = width - 2);
+        println!("{}", bar);
+        println!();
+    }
+
+    println!("  Ausgabedatei:");
+    println!("  {}", path);
     println!();
 }
