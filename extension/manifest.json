@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "name": "YouTube Music Downloader",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "Adds a ▼ MP3 download button to YouTube videos. Requires the yt-music-downloader desktop app to be installed and set up.",
   "icons": {
     "48": "icons/icon-48.png",
@@ -12,6 +12,7 @@
   ],
   "browser_specific_settings": {
     "gecko": {
+    "update_url": "https://github.com/sshcrack/yt-dlp-music-downloader/releases/latest/download/updates.json",
       "data_collection_permissions": {
         "required": ["none"],
         "optional": []
