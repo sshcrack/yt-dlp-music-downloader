@@ -21,6 +21,7 @@ use bytes::Bytes;
 use indicatif::{ProgressBar, ProgressStyle};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use sysuri::UriScheme;
 use tokio::{
     io::{AsyncBufReadExt, BufReader as AsyncBufReader},
     process::Command as AsyncCommand,
@@ -553,28 +554,11 @@ async fn run_download(dir: &Path, video_id: &str) -> Result<Option<String>> {
 
 // ─── Windows URI-scheme registration ─────────────────────────────────────────
 
-#[cfg(target_os = "windows")]
 fn register_uri_scheme() -> Result<()> {
-    use winreg::RegKey;
-    use winreg::enums::*;
-
     let exe = std::env::current_exe().context("Kann ausführbaren Pfad nicht ermitteln")?;
-    let exe_str = exe
-        .to_str()
-        .context("Ausführbarer Pfad ist kein gültiges UTF-8")?;
+    let scheme = UriScheme::new("ytdlpmusic", "Downloads youtube videos as music", exe);
 
-    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
-    let (key, _) = hkcu
-        .create_subkey(r"Software\Classes\ytdlpmusic")
-        .context("Konnte Registry-Schlüssel nicht erstellen")?;
-    key.set_value("", &"URL:ytdlpmusic Protocol")?;
-    key.set_value("URL Protocol", &"")?;
-
-    let (cmd_key, _) = hkcu
-        .create_subkey(r"Software\Classes\ytdlpmusic\shell\open\command")
-        .context("Konnte Registry-Unterschlüssel nicht erstellen")?;
-    cmd_key.set_value("", &format!("\"{}\" \"%1\"", exe_str))?;
-
+    sysuri::register(&scheme)?;
     Ok(())
 }
 
@@ -589,11 +573,9 @@ fn register_uri_scheme() -> Result<()> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let args: Vec<String> = std::env::args().collect();
-
     // Download mode: launched by Windows as the handler for ytdlpmusic://…
-    if let Some(uri) = args.get(1).filter(|a| a.starts_with("ytdlpmusic://")) {
-        return download_mode(uri).await;
+    if let Some(uri) = sysuri::parse_args() {
+        return download_mode(&uri).await;
     }
 
     // Setup mode: first run / manual launch
