@@ -103,4 +103,8 @@
 
   // Also run immediately in case the page was already loaded.
   tryInject();
+
+  setInterval(() => {
+    tryInject()
+  }, 1000)
 })();
