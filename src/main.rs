@@ -1,7 +1,12 @@
 // ytmusic-dl — portable YouTube → MP3 downloader
-// Firefox is opened via Selenium (thirtyfour + geckodriver).
-// A download button is injected next to the video title.
-// Pressing it closes the browser and runs yt-dlp with a progress bar.
+// A Firefox extension injects a download button on YouTube /watch pages.
+// Clicking it opens the custom URI  ytdlpmusic://<video_id>  which launches
+// this binary to download the video as MP3 via yt-dlp.
+//
+// Two modes:
+//   setup mode  (no arguments)  — update bundled tools, register the URI
+//                                 scheme, and print extension install info.
+//   download mode  (ytdlpmusic://VIDEO_ID)  — download the MP3 directly.
 
 use std::{
     fs,
@@ -15,18 +20,15 @@ use anyhow::{Context, Result, anyhow};
 use bytes::Bytes;
 use indicatif::{ProgressBar, ProgressStyle};
 use reqwest::Client;
-use rfd::FileDialog;
 use serde::{Deserialize, Serialize};
-use thirtyfour::{FirefoxCapabilities, WebDriver};
+use sysuri::UriScheme;
 use tokio::{
     io::{AsyncBufReadExt, BufReader as AsyncBufReader},
     process::Command as AsyncCommand,
-    time::sleep,
 };
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 
-const GECKODRIVER_PORT: u16 = 4445;
 const SECS_DAY: u64 = 86_400;
 const SECS_MONTH: u64 = 86_400 * 30;
 
@@ -56,7 +58,6 @@ fn now_secs() -> u64 {
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct Cache {
-    geckodriver_version: Option<String>,
     ytdlp_last_check: Option<u64>,
     ffmpeg_last_dl: Option<u64>,
     deno_last_check: Option<u64>,
@@ -202,48 +203,6 @@ fn binary_version(bin: &Path, flag: &str, idx: usize) -> Option<String> {
 }
 
 // ─── Updaters ─────────────────────────────────────────────────────────────────
-
-async fn update_geckodriver(client: &Client, dir: &Path, cache: &mut Cache) -> Result<()> {
-    section("geckodriver");
-    let bin = dir.join("geckodriver.exe");
-    let rel = gh_latest(client, "mozilla/geckodriver").await?;
-    let latest = strip_v(&rel.tag_name);
-
-    let current = binary_version(&bin, "--version", 1);
-    let needs = current
-        .as_deref()
-        .map(|v| semver_older(v, &latest))
-        .unwrap_or(true);
-
-    match &current {
-        None => println!("  nicht gefunden — lade {} herunter", latest),
-        Some(v) if needs => println!("  {} → {}", v, latest),
-        Some(v) => {
-            println!("  {} ✓", v);
-            return Ok(());
-        }
-    }
-
-    let zip_name = format!("geckodriver-v{}-win64.zip", latest);
-    let asset = rel
-        .assets
-        .iter()
-        .find(|a| a.name == zip_name)
-        .with_context(|| format!("Asset '{}' in Release nicht gefunden", zip_name))?;
-
-    download_zip(
-        client,
-        &asset.browser_download_url,
-        "Lade geckodriver herunter",
-        dir,
-        &["geckodriver.exe"],
-    )
-    .await?;
-
-    cache.geckodriver_version = Some(latest.clone());
-    println!("  geckodriver {} installiert", latest);
-    Ok(())
-}
 
 async fn update_ytdlp(client: &Client, dir: &Path, cache: &mut Cache) -> Result<()> {
     let bin = dir.join("yt-dlp.exe");
@@ -412,108 +371,24 @@ async fn update_deno(client: &Client, dir: &Path, cache: &mut Cache) -> Result<(
     Ok(())
 }
 
-// ─── Geckodriver process ──────────────────────────────────────────────────────
-
-fn spawn_geckodriver(dir: &Path) -> Result<std::process::Child> {
-    std::process::Command::new(dir.join("geckodriver.exe"))
-        .args(["--port", &GECKODRIVER_PORT.to_string()])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .context("Starten von geckodriver.exe fehlgeschlagen")
-}
-
-// ─── WebDriver / Firefox ──────────────────────────────────────────────────────
-
-async fn open_browser(dir: &Path) -> Result<WebDriver> {
-    let profile = dir.join("firefox-profile");
-    fs::create_dir_all(&profile)?;
-    let profile_str = profile
-        .to_str()
-        .context("Profilpfad ist kein gültiges UTF-8")?;
-
-    let mut caps = FirefoxCapabilities::new();
-    // Pass profile path via Firefox command-line args (geckodriver supports this)
-    caps.add_arg("-profile")?;
-    caps.add_arg(profile_str)?;
-
-    let firefox_path = dir.join("firefox_binary_path");
-    if !firefox_path.exists() {
-        let files = FileDialog::new()
-            .add_filter("Executables", &["exe"])
-            .pick_file()
-            .expect("Du musst deine Firefox-Installation auswählen (firefox.exe)");
-
-        fs::write(&firefox_path, files.to_str().unwrap_or(""))
-            .context("Speichern des Firefox-Pfads fehlgeschlagen")?;
-    }
-
-    let firefox_binary = fs::read_to_string(&firefox_path)
-        .context("Konnte firefox_binary_path nicht lesen")?
-        .trim()
-        .to_string();
-
-    caps.set_firefox_binary(&firefox_binary)?;
-    WebDriver::new(&format!("http://localhost:{}", GECKODRIVER_PORT), caps)
-        .await
-        .context("Verbindung zu Firefox über geckodriver fehlgeschlagen")
-}
-
-// ─── Download-button injection ────────────────────────────────────────────────
-
-/// JavaScript injected into every YouTube /watch page.
-/// Returns: "exists" | "no_title" | "injected"
-const INJECT_JS: &str = r#"
-(function() {
-    if (document.getElementById('__ytdl_btn')) return 'exists';
-
-    var titleEl = document.querySelector('#above-the-fold > div:nth-child(1)');
-    if (!titleEl) return 'no_title';
-
-    var btn = document.createElement('button');
-    btn.id = '__ytdl_btn';
-    btn.textContent = '\u25BC\u00A0MP3 herunterladen';
-
-    var s = btn.style;
-    s.background     = 'linear-gradient(135deg, #b80000, #ff2222)';
-    s.color          = '#ffffff';
-    s.border         = 'none';
-    s.padding        = '7px 18px';
-    s.fontSize       = '13px';
-    s.fontWeight     = '700';
-    s.fontFamily     = '"YouTube Sans", Roboto, Arial, sans-serif';
-    s.borderRadius   = '18px';
-    s.cursor         = 'pointer';
-    s.marginLeft     = '14px';
-    s.verticalAlign  = 'middle';
-    s.display        = 'inline-block';
-    s.boxShadow      = '0 2px 8px rgba(0,0,0,.35)';
-    s.transition     = 'opacity .15s ease';
-    s.whiteSpace     = 'nowrap';
-    s.letterSpacing  = '.3px';
-
-    btn.onmouseover = function() { this.style.opacity = '.80'; };
-    btn.onmouseout  = function() { this.style.opacity = '1';   };
-
-    btn.addEventListener('click', function () {
-        window.__ytdl_clicked = true;
-        window.__ytdl_url     = location.href;
-        this.textContent      = '\u2713\u00A0Starte\u2026';
-        this.disabled         = true;
-        this.style.background = '#555';
-        this.style.cursor     = 'default';
-        this.style.opacity    = '1';
-    });
-
-    titleEl.appendChild(btn);
-    return 'injected';
-})()
-"#;
-
 // ─── Video-ID extraction ──────────────────────────────────────────────────────
 
-fn extract_video_id(url: &str) -> Option<String> {
-    let qs = url.splitn(2, '?').nth(1).unwrap_or("");
+/// Accepts either a full YouTube URL or a bare video ID (from the custom URI).
+fn extract_video_id(input: &str) -> Option<String> {
+    // ytdlpmusic://VIDEO_ID  — the authority part is the ID
+    if let Some(id) = input.strip_prefix("ytdlpmusic://") {
+        let id = id.trim_matches('/');
+        let id: String = id
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '-' || *c == '_')
+            .collect();
+        if !id.is_empty() {
+            return Some(id);
+        }
+    }
+
+    // Full YouTube URL  (https://www.youtube.com/watch?v=…)
+    let qs = input.splitn(2, '?').nth(1).unwrap_or("");
     for pair in qs.split('&') {
         if let Some(val) = pair.strip_prefix("v=") {
             let id: String = val
@@ -677,18 +552,44 @@ async fn run_download(dir: &Path, video_id: &str) -> Result<Option<String>> {
     }
 }
 
+// ─── Windows URI-scheme registration ─────────────────────────────────────────
+
+fn register_uri_scheme() -> Result<()> {
+    let exe = std::env::current_exe().context("Kann ausführbaren Pfad nicht ermitteln")?;
+    let scheme = UriScheme::new("ytdlpmusic", "Downloads youtube videos as music", exe);
+
+    sysuri::register(&scheme)?;
+    Ok(())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn register_uri_scheme() -> Result<()> {
+    Err(anyhow!(
+        "URI-Schema-Registrierung wird nur unter Windows unterstützt"
+    ))
+}
+
 // ─── Main loop ────────────────────────────────────────────────────────────────
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Download mode: launched by Windows as the handler for ytdlpmusic://…
+    if let Some(uri) = sysuri::parse_args() {
+        return download_mode(&uri).await;
+    }
+
+    // Setup mode: first run / manual launch
+    setup_mode().await
+}
+
+/// Setup mode — update bundled tools, register the URI scheme, print help.
+async fn setup_mode() -> Result<()> {
     let dir = exe_dir()?;
     let cache_path = dir.join("versions.json");
 
     print_banner();
 
-    // Ensure sub-directories exist
     fs::create_dir_all(dir.join("ffmpeg"))?;
-    fs::create_dir_all(dir.join("firefox-profile"))?;
 
     let mut cache = load_cache(&cache_path);
 
@@ -711,141 +612,95 @@ async fn main() -> Result<()> {
         };
     }
 
-    try_update!(update_geckodriver(&client, &dir, &mut cache), "geckodriver");
     try_update!(update_ytdlp(&client, &dir, &mut cache), "yt-dlp");
     try_update!(update_ffmpeg(&client, &dir, &mut cache), "ffmpeg");
     try_update!(update_deno(&client, &dir, &mut cache), "deno");
 
     save_cache(&cache_path, &cache)?;
 
-    // ── Browser ───────────────────────────────────────────────────────────────
+    // ── URI scheme registration ───────────────────────────────────────────────
     println!();
-    println!("Browser");
+    println!("URI-Schema");
     println!("────────────────────────────────────────");
-
-    let mut geckoproc = spawn_geckodriver(&dir)?;
-    sleep(Duration::from_millis(2000)).await;
-
-    let driver = match open_browser(&dir).await {
-        Ok(d) => d,
-        Err(e) => {
-            let _ = geckoproc.kill();
-            return Err(e);
-        }
-    };
-
-    driver
-        .get("https://www.youtube.com")
-        .await
-        .context("Konnte nicht zu YouTube navigieren")?;
-
-    println!("  Firefox ist bereit.");
-    println!("  Öffne ein YouTube-Video und klicke dann auf ▼ MP3 herunterladen.");
-    println!();
-
-    // ── Poll loop ─────────────────────────────────────────────────────────────
-    let mut last_url = String::new();
-    let mut download_url: Option<String> = None;
-
-    'poll: loop {
-        sleep(Duration::from_millis(600)).await;
-
-        // Detect if the browser was closed by the user
-        let current_url = match driver.current_url().await {
-            Ok(u) => u.to_string(),
-            Err(_) => {
-                println!("  Browser wurde geschlossen — beende.");
-                break 'poll;
-            }
-        };
-
-        if !current_url.contains("youtube.com/watch") {
-            if current_url != last_url {
-                last_url = current_url;
-            }
-            continue;
-        }
-
-        // ── We are on a /watch page ───────────────────────────────────────────
-        if current_url != last_url {
-            // URL changed (new video navigated to): reset click state and
-            // wait for YouTube's SPA to finish rendering the new page.
-            last_url = current_url.clone();
-            let _ = driver
-                .execute(
-                    "window.__ytdl_clicked = false; window.__ytdl_url = '';",
-                    vec![],
-                )
-                .await;
-            sleep(Duration::from_millis(2500)).await;
-        }
-
-        // Inject (or re-inject) the button.
-        // The script is idempotent: it returns "exists" if already present.
-        if let Ok(r) = driver.execute(INJECT_JS, vec![]).await {
-            if r.json().as_str() == Some("injected") {
-                // New injection — print the video title for feedback
-                if let Ok(t) = driver
-                    .execute(
-                        "return document.title.replace(/ - YouTube$/, '').trim();",
-                        vec![],
-                    )
-                    .await
-                {
-                    let title = t.json().as_str().unwrap_or("?");
-                    println!("  ▶  \"{}\"", title);
-                }
-            }
-        }
-
-        // Check if the user clicked Download
-        let clicked = driver
-            .execute("return window.__ytdl_clicked === true;", vec![])
-            .await
-            .map(|r| r.json().as_bool().unwrap_or(false))
-            .unwrap_or(false);
-
-        if clicked {
-            let url = driver
-                .execute("return window.__ytdl_url || '';", vec![])
-                .await
-                .map(|r| r.json().as_str().unwrap_or("").to_string())
-                .unwrap_or_default();
-
-            if !url.is_empty() {
-                download_url = Some(url);
-                break 'poll;
-            }
-        }
+    match register_uri_scheme() {
+        Ok(()) => println!("  ytdlpmusic:// erfolgreich registriert ✓"),
+        Err(e) => eprintln!("  WARNUNG: Registrierung fehlgeschlagen: {}", e),
     }
 
-    // ── Tear down browser ─────────────────────────────────────────────────────
-    let _ = driver.quit().await;
-    let _ = geckoproc.kill();
+    // ── Extension install instructions ───────────────────────────────────────
+    println!();
+    println!("Firefox-Erweiterung");
+    println!("────────────────────────────────────────");
+    println!("  Lade die mitgelieferte Erweiterung im Ordner 'extension/' in Firefox:");
+    println!("    1. Firefox öffnen");
+    println!("    2. about:debugging aufrufen");
+    println!("    3. \"Dieser Firefox\" → \"Temporäres Add-on laden\"");
+    println!("    4. extension/manifest.json auswählen");
+    println!();
+    println!("  Für eine dauerhafte Installation: Extension als .zip verpacken");
+    println!("  und bei addons.mozilla.org einreichen.");
+    println!();
+    println!("────────────────────────────────────────");
+    print!("Drücke Enter zum Schließen…");
+    let _ = io::stdout().flush();
+    let mut buf = String::new();
+    let _ = io::stdin().read_line(&mut buf);
 
-    // ── Download ──────────────────────────────────────────────────────────────
-    match download_url.and_then(|u| extract_video_id(&u).map(|id| (u, id))) {
-        None => {
-            eprintln!("Keine Video-URL erfasst.");
-        }
-        Some((raw_url, video_id)) => {
-            println!();
-            println!("Herunterladen");
-            println!("────────────────────────────────────────");
-            println!("  ID: {}", video_id);
-            match run_download(&dir, &video_id).await {
-                Ok(Some(created)) => {
-                    println!();
-                    print_completion(&created);
-                }
-                Ok(None) => {
-                    // keine Datei ermittelt, nichts weiter tun
-                }
-                Err(e) => {
-                    eprintln!("  Fehler: {}", e);
-                    eprintln!("  URL war: {}", raw_url);
-                }
+    Ok(())
+}
+
+/// Download mode — called by Windows when the user opens a ytdlpmusic:// URI.
+async fn download_mode(uri: &str) -> Result<()> {
+    let dir = exe_dir()?;
+    let cache_path = dir.join("versions.json");
+
+    print_banner();
+
+    // extract_video_id strips the URI to only alphanumeric / '-' / '_' chars,
+    // so no shell-injection is possible even with a crafted ytdlpmusic:// URI.
+    let video_id = extract_video_id(uri)
+        .ok_or_else(|| anyhow!("Ungültige URI — kein Video-ID gefunden: {}", uri))?;
+
+    let mut cache = load_cache(&cache_path);
+
+    let client = Client::builder()
+        .timeout(Duration::from_secs(300))
+        .build()?;
+
+    // Silently ensure tools are up-to-date (respects the day/month throttle).
+    fs::create_dir_all(dir.join("ffmpeg"))?;
+
+    macro_rules! try_update {
+        ($fut:expr, $name:expr) => {
+            if let Err(e) = $fut.await {
+                eprintln!(
+                    "  WARNUNG: Aktualisierung von {} fehlgeschlagen: {}",
+                    $name, e
+                );
             }
+        };
+    }
+
+    println!("Abhängigkeiten");
+    println!("────────────────────────────────────────");
+    try_update!(update_ytdlp(&client, &dir, &mut cache), "yt-dlp");
+    try_update!(update_ffmpeg(&client, &dir, &mut cache), "ffmpeg");
+    try_update!(update_deno(&client, &dir, &mut cache), "deno");
+    save_cache(&cache_path, &cache)?;
+
+    println!();
+    println!("Herunterladen");
+    println!("────────────────────────────────────────");
+    println!("  ID: {}", video_id);
+
+    match run_download(&dir, &video_id).await {
+        Ok(Some(created)) => {
+            println!();
+            print_completion(&created);
+        }
+        Ok(None) => {}
+        Err(e) => {
+            eprintln!("  Fehler: {}", e);
         }
     }
 
