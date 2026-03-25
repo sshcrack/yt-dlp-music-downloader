@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "name": "YouTube Music Downloader",
-  "version": "1.0.0",
+  "version": "0.3.0",
   "description": "Adds a ▼ MP3 download button to YouTube videos. Requires the yt-music-downloader desktop app to be installed and set up.",
 
   "icons": {
